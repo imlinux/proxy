@@ -27,8 +27,6 @@ public class Proxy implements Runnable {
 
     private final ProxyWorker proxyWorker;
 
-    private final TargetWorker targetWorker;
-
     private Proxy(SocketAddress bindAddress) throws IOException {
 
         this.bindAddress = bindAddress;
@@ -38,7 +36,6 @@ public class Proxy implements Runnable {
         serverSocketChannel.configureBlocking(false);
 
         proxyWorker = new ProxyWorker();
-        targetWorker = new TargetWorker();
     }
 
 
@@ -72,7 +69,7 @@ public class Proxy implements Runnable {
                     SelectionKey selectionKey = iterator.next();
                     iterator.remove();
 
-                    if(selectionKey.isAcceptable()) {
+                    if(selectionKey.isValid() && selectionKey.isAcceptable()) {
                         ServerSocketChannel serverSocketChannel = (ServerSocketChannel) selectionKey.channel();
                         doAccept(serverSocketChannel);
                     }
@@ -96,7 +93,6 @@ public class Proxy implements Runnable {
             ProxyConnection proxyConnection = new ProxyConnection(sc, targetSocketChannel);
 
             proxyWorker.registerProxyConnection(proxyConnection);
-            targetWorker.registerProxyConnection(proxyConnection);
         }
     }
 
@@ -110,6 +106,5 @@ public class Proxy implements Runnable {
         executorService.execute(proxy);
 
         executorService.execute(proxy.proxyWorker);
-        executorService.execute(proxy.targetWorker);
     }
 }

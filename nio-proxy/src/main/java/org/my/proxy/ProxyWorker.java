@@ -50,7 +50,8 @@ public class ProxyWorker implements Runnable {
 
             if(con == null) break;
 
-            con.getProxySocket().register(selector, SelectionKey.OP_READ|SelectionKey.OP_WRITE, con);
+            con.getProxySocket().register(selector, SelectionKey.OP_READ|SelectionKey.OP_WRITE, new ConnWrap(con, ConnType.Proxy));
+            con.getTargetSocket().register(selector, SelectionKey.OP_READ|SelectionKey.OP_WRITE|SelectionKey.OP_CONNECT, new ConnWrap(con, ConnType.Target));
         }
     }
 
@@ -69,49 +70,118 @@ public class ProxyWorker implements Runnable {
                 SelectionKey selectionKey = iterator.next();
                 iterator.remove();
 
-                ProxyConnection proxyConnection = (ProxyConnection) selectionKey.attachment();
+                ConnWrap connWrap = (ConnWrap) selectionKey.attachment();
+
+                SocketChannel socketChannel = (SocketChannel) selectionKey.channel();
+
                 if(selectionKey.isValid() && selectionKey.isReadable()) {
 
-                    SocketChannel socketChannel = (SocketChannel) selectionKey.channel();
+                    switch (connWrap.connType) {
+                        case Proxy:
+                            while (true) {
+                                ByteBuffer byteBuffer = ByteBuffer.allocate(1024);
+                                int n = socketChannel.read(byteBuffer);
 
-                    while (true) {
-                        ByteBuffer byteBuffer = ByteBuffer.allocate(1024);
-                        int n = socketChannel.read(byteBuffer);
+                                if(n > 0) {
+                                    byteBuffer.flip();
+                                    connWrap.con.getSendQueue().add(byteBuffer);
+                                }
 
-                        if(n > 0) {
-                            byteBuffer.flip();
-                            proxyConnection.getSendQueue().add(byteBuffer);
-                        }
+                                if(n <= -1) {
+                                    socketChannel.close();
+                                    connWrap.con.getTargetSocket().close();
+                                }
 
-                        if(n <= -1) {
-                            socketChannel.close();
-                            proxyConnection.getTargetSocket().close();
-                        }
-
-                        if(n < 1024) {
+                                if(n < 1024) {
+                                    break;
+                                }
+                            }
                             break;
-                        }
+                        case Target:
+
+                            while (true) {
+                                ByteBuffer byteBuffer = ByteBuffer.allocate(1024);
+                                int n = socketChannel.read(byteBuffer);
+
+                                if(n > 0) {
+                                    byteBuffer.flip();
+                                    connWrap.con.getRecvQueue().add(byteBuffer);
+                                }
+
+                                if(n <= -1) {
+                                    socketChannel.close();
+                                }
+
+                                if(n < 1024) {
+                                    break;
+                                }
+                            }
+
+                            break;
                     }
                 }
 
 
                 if(selectionKey.isValid() && selectionKey.isWritable()) {
 
-                    SocketChannel socketChannel = (SocketChannel) selectionKey.channel();
+                    switch (connWrap.connType) {
+                        case Proxy:
 
-                    BlockingQueue<ByteBuffer> recvQueue = proxyConnection.getRecvQueue();
+                            BlockingQueue<ByteBuffer> recvQueue = connWrap.con.getRecvQueue();
 
-                    while (true) {
-                        ByteBuffer byteBuffer = recvQueue.peek();
+                            while (true) {
+                                ByteBuffer byteBuffer = recvQueue.peek();
 
-                        if(byteBuffer == null) break;
+                                if(byteBuffer == null) break;
 
-                        socketChannel.write(byteBuffer);
+                                socketChannel.write(byteBuffer);
 
-                        if(!byteBuffer.hasRemaining()) recvQueue.poll();
+                                if(!byteBuffer.hasRemaining()) recvQueue.poll();
+                            }
+                            break;
+
+                        case Target:
+
+                            BlockingQueue<ByteBuffer> sendQueue = connWrap.con.getSendQueue();
+
+                            while (true) {
+                                ByteBuffer byteBuffer = sendQueue.peek();
+
+                                if(byteBuffer == null) break;
+
+                                socketChannel.write(byteBuffer);
+
+                                if(!byteBuffer.hasRemaining()) sendQueue.remove();
+
+                            }
+
+                            break;
                     }
                 }
+
+                if(selectionKey.isValid() && selectionKey.isConnectable()) {
+                    socketChannel.finishConnect();
+                }
             }
+        }
+    }
+
+    enum ConnType {
+
+        Proxy,
+
+        Target
+    }
+
+    private class ConnWrap {
+
+        private ProxyConnection con;
+
+        private ConnType connType;
+
+        public ConnWrap(ProxyConnection con, ConnType connType) {
+            this.con = con;
+            this.connType = connType;
         }
     }
 }
