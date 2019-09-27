@@ -1,5 +1,7 @@
 package org.my.proxy;
 
+import com.codahale.metrics.MetricRegistry;
+
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
@@ -7,6 +9,7 @@ import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
 import java.util.Iterator;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 
 /**
@@ -16,18 +19,25 @@ import java.util.concurrent.LinkedBlockingQueue;
  **/
 public class ProxyWorker implements Runnable {
 
+    private final MetricRegistry metrics;
+
+    private final ExecutorService executorService;
+
     private final Selector selector;
 
     private final BlockingQueue<ProxyConnection> registerQueue;
 
-    ProxyWorker() throws IOException {
+    ProxyWorker(MetricRegistry metrics, ExecutorService executorService) throws IOException {
+        this.metrics = metrics;
+
+        this.executorService = executorService;
 
         selector = Selector.open();
 
         registerQueue = new LinkedBlockingQueue<>();
     }
 
-    public void registerProxyConnection(ProxyConnection proxyConnection) throws IOException {
+    public void registerProxyConnection(ProxyConnection proxyConnection) {
         registerQueue.add(proxyConnection);
     }
 
@@ -78,45 +88,11 @@ public class ProxyWorker implements Runnable {
 
                     switch (connWrap.connType) {
                         case Proxy:
-                            while (true) {
-                                ByteBuffer byteBuffer = ByteBuffer.allocate(1024);
-                                int n = socketChannel.read(byteBuffer);
-
-                                if(n > 0) {
-                                    byteBuffer.flip();
-                                    connWrap.con.getSendQueue().add(byteBuffer);
-                                }
-
-                                if(n <= -1) {
-                                    socketChannel.close();
-                                    connWrap.con.getTargetSocket().close();
-                                }
-
-                                if(n < 1024) {
-                                    break;
-                                }
-                            }
+                            processProxyRead(connWrap.con);
                             break;
                         case Target:
 
-                            while (true) {
-                                ByteBuffer byteBuffer = ByteBuffer.allocate(1024);
-                                int n = socketChannel.read(byteBuffer);
-
-                                if(n > 0) {
-                                    byteBuffer.flip();
-                                    connWrap.con.getRecvQueue().add(byteBuffer);
-                                }
-
-                                if(n <= -1) {
-                                    socketChannel.close();
-                                }
-
-                                if(n < 1024) {
-                                    break;
-                                }
-                            }
-
+                            processTargetRead(connWrap.con);
                             break;
                     }
                 }
@@ -126,35 +102,12 @@ public class ProxyWorker implements Runnable {
 
                     switch (connWrap.connType) {
                         case Proxy:
-
-                            BlockingQueue<ByteBuffer> recvQueue = connWrap.con.getRecvQueue();
-
-                            while (true) {
-                                ByteBuffer byteBuffer = recvQueue.peek();
-
-                                if(byteBuffer == null) break;
-
-                                socketChannel.write(byteBuffer);
-
-                                if(!byteBuffer.hasRemaining()) recvQueue.poll();
-                            }
+                            processProxyWrite(connWrap.con);
                             break;
 
                         case Target:
 
-                            BlockingQueue<ByteBuffer> sendQueue = connWrap.con.getSendQueue();
-
-                            while (true) {
-                                ByteBuffer byteBuffer = sendQueue.peek();
-
-                                if(byteBuffer == null) break;
-
-                                socketChannel.write(byteBuffer);
-
-                                if(!byteBuffer.hasRemaining()) sendQueue.remove();
-
-                            }
-
+                            processTargetWrite(connWrap.con);
                             break;
                     }
                 }
@@ -163,6 +116,106 @@ public class ProxyWorker implements Runnable {
                     socketChannel.finishConnect();
                 }
             }
+        }
+    }
+
+    private void processProxyRead(ProxyConnection proxyConnection) {
+
+        try {
+            SocketChannel socketChannel = proxyConnection.getProxySocket();
+
+            while (true) {
+                ByteBuffer byteBuffer = ByteBuffer.allocate(1024);
+                int n = socketChannel.read(byteBuffer);
+
+                if (n > 0) {
+                    byteBuffer.flip();
+                    proxyConnection.getSendQueue().add(byteBuffer);
+                }
+
+                if (n <= -1) {
+                    socketChannel.close();
+                    proxyConnection.getTargetSocket().close();
+                }
+
+                if (n < 1024) {
+                    metrics.meter("proxy-read").mark();
+                    break;
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void processTargetRead(ProxyConnection proxyConnection) {
+
+        try {
+            SocketChannel socketChannel = proxyConnection.getTargetSocket();
+
+            while (true) {
+                ByteBuffer byteBuffer = ByteBuffer.allocate(1024);
+                int n = socketChannel.read(byteBuffer);
+
+                if (n > 0) {
+                    byteBuffer.flip();
+                    proxyConnection.getRecvQueue().add(byteBuffer);
+                }
+
+                if (n <= -1) {
+                    socketChannel.close();
+                }
+
+                if (n < 1024) {
+                    metrics.meter("target-recv").mark();
+                    break;
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void processProxyWrite(ProxyConnection proxyConnection) {
+
+        try {
+            SocketChannel socketChannel = proxyConnection.getProxySocket();
+
+            BlockingQueue<ByteBuffer> recvQueue = proxyConnection.getRecvQueue();
+
+            while (true) {
+                ByteBuffer byteBuffer = recvQueue.peek();
+
+                if (byteBuffer == null) break;
+
+                socketChannel.write(byteBuffer);
+
+                if (!byteBuffer.hasRemaining()) recvQueue.poll();
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void processTargetWrite(ProxyConnection proxyConnection) {
+
+        try {
+            BlockingQueue<ByteBuffer> sendQueue = proxyConnection.getSendQueue();
+
+            SocketChannel socketChannel = proxyConnection.getTargetSocket();
+
+            while (true) {
+                ByteBuffer byteBuffer = sendQueue.peek();
+
+                if (byteBuffer == null) break;
+
+                socketChannel.write(byteBuffer);
+
+                if (!byteBuffer.hasRemaining()) sendQueue.remove();
+
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
         }
     }
 
