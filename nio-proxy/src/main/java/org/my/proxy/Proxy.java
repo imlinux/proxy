@@ -10,7 +10,9 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
+import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -25,7 +27,7 @@ public class Proxy implements Runnable {
 
     private final MetricRegistry metrics;
 
-    private final ExecutorService executorService;
+    private final List<ProxyWorker> proxyWorkers;
 
     private final Selector selector;
 
@@ -33,21 +35,19 @@ public class Proxy implements Runnable {
 
     private final SocketAddress bindAddress;
 
-    private final ProxyWorker proxyWorker;
+    private int currentWorker = 0;
 
-    private Proxy(MetricRegistry metrics, SocketAddress bindAddress, ExecutorService executorService) throws IOException {
+    private Proxy(MetricRegistry metrics, SocketAddress bindAddress, List<ProxyWorker> proxyWorkers) throws IOException {
 
         this.metrics = metrics;
 
-        this.executorService = executorService;
+        this.proxyWorkers = proxyWorkers;
 
         this.bindAddress = bindAddress;
         selector = Selector.open();
 
         serverSocketChannel = ServerSocketChannel.open();
         serverSocketChannel.configureBlocking(false);
-
-        proxyWorker = new ProxyWorker(metrics, executorService);
     }
 
 
@@ -104,8 +104,13 @@ public class Proxy implements Runnable {
 
             ProxyConnection proxyConnection = new ProxyConnection(sc, targetSocketChannel);
 
-            proxyWorker.registerProxyConnection(proxyConnection);
+            getProxyWork().registerProxyConnection(proxyConnection);
         }
+    }
+
+    private ProxyWorker getProxyWork() {
+        currentWorker = (currentWorker + 1) % proxyWorkers.size();
+        return proxyWorkers.get(currentWorker);
     }
 
     public static void main(String[] args) throws Exception {
@@ -114,12 +119,17 @@ public class Proxy implements Runnable {
 
         ExecutorService executorService = Executors.newFixedThreadPool(4);
 
-        Proxy proxy = new Proxy(metrics, new InetSocketAddress(8080), executorService);
+        List<ProxyWorker> proxyWorkers = new ArrayList<>();
 
+        for(int i = 0; i< 4; i++) {
+            proxyWorkers.add(new ProxyWorker(metrics));
+        }
+
+        Proxy proxy = new Proxy(metrics, new InetSocketAddress(8080), proxyWorkers);
 
         executorService.execute(proxy);
 
-        executorService.execute(proxy.proxyWorker);
+        proxyWorkers.forEach(proxyWorker -> executorService.execute(proxyWorker));
 
         ConsoleReporter reporter = ConsoleReporter.forRegistry(metrics)
                 .convertRatesTo(TimeUnit.SECONDS)

@@ -21,16 +21,12 @@ public class ProxyWorker implements Runnable {
 
     private final MetricRegistry metrics;
 
-    private final ExecutorService executorService;
-
     private final Selector selector;
 
     private final BlockingQueue<ProxyConnection> registerQueue;
 
-    ProxyWorker(MetricRegistry metrics, ExecutorService executorService) throws IOException {
+    ProxyWorker(MetricRegistry metrics) throws IOException {
         this.metrics = metrics;
-
-        this.executorService = executorService;
 
         selector = Selector.open();
 
